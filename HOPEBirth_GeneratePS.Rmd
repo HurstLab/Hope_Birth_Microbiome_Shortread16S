@@ -1,0 +1,723 @@
+---
+title: "BirthPhyloseq_Final"
+output: html_document
+date: "2026-04-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+
+set.seed(1234)
+
+library(dada2)
+library(dplyr)
+library(tibble)
+library(purrr)
+library(phyloseq)
+library(ggplot2)
+library(Biostrings)
+library(ape)
+library(stringr)
+library(vegan)
+library(magrittr)
+library(ape)
+library(glmnet)
+library(DESeq2)
+library(tidyverse)
+library(cluster)
+library(devtools)
+library(decontam)
+library(vegan)
+library(phyloseq)
+library(tidyr)
+library(nlme)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(compositions)
+library(BiocManager)
+library(microbiome)
+
+library(ShortRead)
+library(dada2)
+library(vegan)
+library(phyloseq)
+library(tidyverse)
+library(scales)
+```
+
+```{r}
+
+##############################################################
+##Run 1 (August rerun)
+##############################################################
+
+path <- ("/Users/rapiduser/Desktop/CH_DADATest/Hu_11169_25081402")
+list.files(path)
+
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+sample.names
+plotQualityProfile(fnFs[24:25])
+plotQualityProfile(fnRs[24:25])
+
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(240, 160), maxN=0, maxEE=c(2,2), 
+                     truncQ=2, rm.phix = TRUE, compress=TRUE, multithread=TRUE)
+head(out)
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+plotErrors(errF, nominalQ=TRUE)
+
+###Apply the sample inference algorithm###
+dadaFs <- dada(filtFs, err=errF, multithread = TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread = TRUE)
+
+##Merge paired reads##
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+head(mergers[[1]])
+
+##Construct the sequence table##
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+##Inspect the distribution of the sequence lengths##
+table(nchar(getSequences(seqtab)))
+#This table contains 293 ASVs and the lengths are within the expected range#
+
+#Remove the chimeras#
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+#Chimeras accounts for around 4% of merged sequence reads
+
+##Track the number of reads that made it through the pipeline##
+getN <-function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+#Outside of filtering, there should be no step where a large number of reads are lost#
+
+seqtab.nochimaug25all<-seqtab.nochim
+#Checkpoint! Save object
+saveRDS(seqtab.nochimaug25all, "/Users/rapiduser/Desktop/CH_DADATest/seqtab.nochimaug25all")
+
+#Load in object
+seqtab.nochimaug25all <- readRDS("/Users/rapiduser/Desktop/CH_DADATest/seqtab.nochimaug25all")
+
+#Time to assign taxonomy#
+taxa <-assignTaxonomy(seqtab.nochimaug25all, "/Users/rapiduser/Desktop/CH_DADATest/eHOMD_RefSeq_dada2_V15.22.fasta.gz", multithread = TRUE)
+taxaaug25all <- addSpecies(taxa, "/Users/rapiduser/Desktop/CH_DADATest/eHOMD_RefSeq_dada2_assign_species_V15.22.fasta.gz")
+taxa.print <- taxaaug25all
+rownames(taxa.print) <- NULL
+head(taxa.print)
+
+
+#Taxa checkpoint!
+saveRDS(taxaaug25all, "/Users/rapiduser/Desktop/CH_DADATest/taxaaug25all")
+
+taxaaug25all <- readRDS("/Users/rapiduser/Desktop/CH_DADATest/taxaaug25all")
+
+samples.out <- rownames(seqtab.nochimaug25all)
+
+#Create a data frame of your sample names, and combine with sample metadata
+samdf <- data.frame(Subject=samples.out)
+SampleData<-read.csv("/Users/rapiduser/Desktop/CH_DADATest/samdfaug25all.csv")
+
+samples.out <- as.data.frame(samples.out)
+samples.out$Subject <- samples.out$samples.out
+
+samdf <- merge(samples.out, samdf, by = "Subject", all = FALSE)
+
+samdf <- merge(samdf, SampleData, by = "Subject", all = TRUE) #Make sure the two files have the same 'by' column name
+samdf$quant_reading <- as.numeric(samdf$quant_reading) #Save a hassle later and ensure DNA conc is numeric now
+rownames(samdf) <- samdf$Subject
+
+#Construct phyloseq object
+ps <- phyloseq(otu_table(seqtab.nochimaug25all, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxaaug25all))
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+psaug25all<-ps
+
+#Phyloseq object checkpoint!
+saveRDS(psaug25all, "/Users/rapiduser/Desktop/CH_DADATest/psaug25all.RDS")
+
+```
+
+```{r}
+
+path <- ("/Users/rapiduser/Desktop/CH_DADATest/Hu_10498_24102202")
+
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+sample.names
+#Visualize quality profile of the forward reads
+plotQualityProfile(fnFs[1:2])
+#Visualize quality profile of the reverse reads
+plotQualityProfile(fnRs[1:2])
+
+#Assign the filenames for the filtered fastq.gz files
+#Place filtered files in filtered/subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+#this will use standard filtering parameters and sets parameters for expected errors allowed the read
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(240, 160), maxN=0, maxEE=c(2,2), 
+                     truncQ=2, rm.phix = TRUE, compress=TRUE, multithread=TRUE)
+head(out)
+#Consider using Figaro to determine the best truncation parameters
+#Learn the error rates with the parametric error model
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+plotErrors(errF, nominalQ=TRUE)
+
+###Apply the sample inference algorithm###
+dadaFs <- dada(filtFs, err=errF, multithread = TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread = TRUE)
+#Inspect the dada class object
+dadaFs[[1]]
+help("dada-class")
+
+##Merge paired reads##
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+head(mergers[[1]])
+
+##Construct the sequence table##
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+##Inspect the distribution of the sequence lengths##
+table(nchar(getSequences(seqtab)))
+#This table contains 293 ASVs and the lengths are within the expected range#
+
+#Remove the chimeras#
+seqtab.nochimoct <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochimoct)
+sum(seqtab.nochimoct)/sum(seqtab)
+#Chimeras accounts for around 4% of merged sequence reads
+
+##Track the number of reads that made it through the pipeline##
+getN <-function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochimoct))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+#Outside of filtering, there should be no step where a large number of reads are lost#
+
+#Checkpoint! Save your object so you can start here after reloading R
+saveRDS(seqtab.nochimoct, "/Users/rapiduser/Desktop/CH_DADATest/seqtab.nochimoct")
+
+#Load in your object and start from here if reloading your R
+seqtab.nochimoct <- readRDS("/Users/rapiduser/Desktop/CH_DADATest/seqtab.nochimoct")
+
+#Time to assign taxonomy#
+taxaoct <-assignTaxonomy(seqtab.nochimoct, "/Users/rapiduser/Desktop/CH_DADATest/eHOMD_RefSeq_dada2_V15.22.fasta.gz", multithread = TRUE)
+taxaoct <- addSpecies(taxaoct, "/Users/rapiduser/Desktop/CH_DADATest/eHOMD_RefSeq_dada2_assign_species_V15.22.fasta.gz")
+taxa.print <- taxaoct
+rownames(taxa.print) <- NULL
+head(taxa.print)
+
+
+#Taxa checkpoint!
+saveRDS(taxaoct, "/Users/rapiduser/Desktop/CH_DADATest/taxaoct")
+
+taxaoct <- readRDS("/Users/rapiduser/Desktop/CH_DADATest/taxaoct")
+
+samples.out <- rownames(seqtab.nochimoct)
+
+#Create a data frame of your sample names, and combine with sample metadata
+samdf <- data.frame(Subject=samples.out)
+
+samples.out <- as.data.frame(samples.out)
+
+samples.out$Subject <- samples.out$samples.out
+
+samdf <- merge(samples.out, samdf, by = "Subject", all = FALSE)
+
+samdfoct <- read_csv("/Users/rapiduser/Desktop/CH_DADATest/samdfoct.csv")
+
+samdf <- merge(samdf, samdfoct, by = "Subject", all = FALSE)
+
+samdf$quant_reading <- as.numeric(samdf$quant_reading) #Save a hassle later and ensure DNA conc is numeric now
+
+seqtab.nochimoct_filt <- seqtab.nochimoct[rownames(seqtab.nochimoct) %in% samdfoct$Subject, ]
+taxaoct_filt <- taxaoct[rownames(taxaoct) %in% samdfoct$Subject, ]
+
+samples.out <- rownames(seqtab.nochimoct_filt)
+rownames(samdf) <- samples.out
+
+#Construct phyloseq object
+ps <- phyloseq(otu_table(seqtab.nochimoct_filt, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxaoct))
+ps <- prune_samples(sample_names(ps) != "Mock", ps) # Remove mock sample
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+
+#Phyloseq object checkpoint!
+saveRDS(ps, "/Users/rapiduser/Desktop/CH_DADATest/psoct.RDS")
+
+```
+
+```{r}
+##############################################################
+##Run 3 (April)
+##############################################################
+
+
+path <- ("/Users/rapiduser/Desktop/CH_DADATest/Hu_10877_25032802")
+list.files(path)
+
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+sample.names
+#Visualize quality profile of the forward reads
+plotQualityProfile(fnFs[1:2])
+#Visualize quality profile of the reverse reads
+plotQualityProfile(fnRs[1:2])
+
+#Assign the filenames for the filtered fastq.gz files
+#Place filtered files in filtered/subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+#this will use standard filtering parameters and sets parameters for expected errors allowed the read
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen = c(240, 160), maxN=0, maxEE=c(2,2), 
+                     truncQ=2, rm.phix = TRUE, compress=TRUE, multithread=TRUE)
+head(out)
+#Consider using Figaro to determine the best truncation parameters
+#Learn the error rates with the parametric error model
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+plotErrors(errF, nominalQ=TRUE)
+
+###Apply the sample inference algorithm###
+dadaFs <- dada(filtFs, err=errF, multithread = TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread = TRUE)
+#Inspect the dada class object
+dadaFs[[1]]
+help("dada-class")
+
+##Merge paired reads##
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+head(mergers[[1]])
+
+##Construct the sequence table##
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+##Inspect the distribution of the sequence lengths##
+table(nchar(getSequences(seqtab)))
+#This table contains 293 ASVs and the lengths are within the expected range#
+
+#Remove the chimeras#
+seqtab.nochimapril25 <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochimapril25)
+sum(seqtab.nochimapril25)/sum(seqtab)
+#Chimeras accounts for around 4% of merged sequence reads
+
+##Track the number of reads that made it through the pipeline##
+getN <-function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochimapril25))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+#Outside of filtering, there should be no step where a large number of reads are lost#
+
+#Checkpoint! Save your object so you can start here after reloading R
+saveRDS(seqtab.nochimapril25, "/Users/rapiduser/Desktop/CH_DADATest/seqtab.nochimapril25")
+
+#Load in your object and start from here if reloading your R
+seqtab.nochimapril25 <- readRDS("/Users/rapiduser/Desktop/CH_DADATest/seqtab.nochimapril25")
+
+#Time to assign taxonomy#
+taxaapril25 <-assignTaxonomy(seqtab.nochimapril25, "/Users/rapiduser/Desktop/CH_DADATest/eHOMD_RefSeq_dada2_V15.22.fasta.gz", multithread = TRUE)
+taxaapril25 <- addSpecies(taxaapril25, "/Users/rapiduser/Desktop/CH_DADATest/eHOMD_RefSeq_dada2_assign_species_V15.22.fasta.gz")
+taxa.print <- taxaapril25
+rownames(taxa.print) <- NULL
+head(taxa.print)
+
+
+#Taxa checkpoint!
+saveRDS(taxaapril25, "/Users/rapiduser/Desktop/CH_DADATest/taxaapril25")
+
+taxaapril25 <- readRDS("/Users/rapiduser/Desktop/CH_DADATest/taxaapril25")
+
+samples.out <- rownames(seqtab.nochimapril25)
+
+#Create a data frame of your sample names, and combine with sample metadata
+samdf <- data.frame(Subject=samples.out)
+samdfapril25 <- read.csv("/Users/rapiduser/Desktop/CH_DADATest/samdfapril25.csv")
+
+samples.out <- as.data.frame(samples.out)
+samples.out$Subject <- samples.out$samples.out
+
+samdf <- merge(samples.out, samdf, by = "Subject", all = FALSE)
+samdf2 <- merge(samdf, samdfapril25, by = "Subject", all = FALSE) #Make sure the two files have the same 'by' column name
+samdf2$quant_reading <- as.numeric(samdf2$quant_reading) #Save a hassle later and ensure DNA conc is numeric now
+samples.out <- rownames(seqtab.nochimapril25)
+rownames(samdf2) <- samples.out
+
+#Construct phyloseq object
+psapril25 <- phyloseq(otu_table(seqtab.nochimapril25, taxa_are_rows=FALSE), 
+               sample_data(samdf2), 
+               tax_table(taxaapril25))
+dna <- Biostrings::DNAStringSet(taxa_names(psapril25))
+names(dna) <- taxa_names(psapril25)
+psapril25 <- merge_phyloseq(psapril25, dna)
+taxa_names(psapril25) <- paste0("ASV", seq(ntaxa(psapril25)))
+psapril25
+
+#Phyloseq object checkpoint!
+saveRDS(psapril25, "/Users/rapiduser/Desktop/CH_DADATest/psapril25.RDS")
+
+```
+
+
+```{r}
+
+
+psaug25all <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psaug25all.RDS")
+psoct <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psoct.RDS")
+psapril25 <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psapril25.RDS")
+psaug_rerun <- subset_samples(psaug25all, Split == "Rerun")
+psaug_OG <- subset_samples(psaug25all, Split == "OG")
+
+samples_to_remove <- c("Hurst20250624-nasal-zymo")
+psaug_rerun <- prune_samples(!(sample_names(psaug_rerun) %in% samples_to_remove), psaug_rerun)
+
+samples_to_remove <- c("Hurst20250605-ZymoGut")
+psaug_OG <- prune_samples(!(sample_names(psaug_OG) %in% samples_to_remove), psaug_OG)
+
+samples_to_remove <- c("zymo")
+psapril25<- prune_samples(!(sample_names(psapril25) %in% samples_to_remove), psapril25)
+
+samples_to_remove <- c("Hurst20250624-nasal-zymo")
+psaug_rerun <- prune_samples(!(sample_names(psaug_rerun) %in% samples_to_remove), psaug_rerun)
+
+
+```
+
+### Decontam August Rerun
+
+```{r}
+
+
+psaug_rerunnegs <- subset_samples(psaug_rerun, Sample_or_Control == "Control")
+
+ps_filtered_taxa <- prune_taxa(taxa_sums(psaug_rerunnegs) >= 1000, psaug_rerunnegs)
+taxdataaugre<-as.data.frame(taxa_sums(ps_filtered_taxa))
+taxtableaugre<-as.data.frame(tax_table(ps_filtered_taxa))
+taxtableaugre <- tibble::rownames_to_column(taxtableaugre, "ASV")
+taxtableaugre$method <- "NegPresence"
+#remove all!
+
+contamdf.freq <- isContaminant(psaug_rerun, method="frequency", conc="quant_reading")
+table(contamdf.freq$contaminant)
+unique(which(contamdf.freq$contaminant))
+
+augrerunfreq <- as.data.frame(which(contamdf.freq$contaminant))
+
+augrerunfreq$ASV <-which(contamdf.freq$contaminant)
+
+augrerunfreq$ASV <- paste0("ASV", augrerunfreq$ASV)
+augrerunfreq$method <- "frequency"
+
+taxa_remove <- unique(c(augrerunfreq$ASV, taxtableaugre$ASV))
+
+augrecontam <- as.data.frame(taxa_remove)
+augrecontam$batch <- "augrerun"
+augrecontam$ASV <- augrecontam$taxa_remove
+augretaxanames <- as.data.frame(tax_table(psaug_rerun))
+augretaxanames$ASV <- rownames(augretaxanames)
+augrecontam <- merge(augrecontam, augretaxanames, by= "ASV" ,all.x = TRUE )
+
+augreseqs  <- as.data.frame(refseq(psaug_rerun))
+augreseqs$ASV<-rownames(augreseqs)
+augreseqs <- merge(augrecontam, augreseqs, by = "ASV", all.x = TRUE)
+
+# 2. Remove them from the phyloseq object
+psaugrerun_clean <- prune_taxa(!(taxa_names(psaug_rerun) %in% taxa_remove), psaug_rerun)
+
+# Check that they are gone
+taxa_names(psaugrerun_clean)[taxa_names(psaugrerun_clean) %in% taxa_remove]
+
+saveRDS(psaugrerun_clean, "/Users/rapiduser/Desktop/CH_DADATest/psaugrerun_clean.RDS")
+
+
+```
+
+### Decontam August OG
+
+```{r}
+
+
+psaug_OGnegs <- subset_samples(psaug_OG, Sample_or_Control == "Control")
+
+ps_filtered_taxa <- prune_taxa(taxa_sums(psaug_OGnegs) >= 1000, psaug_OGnegs)
+taxdataaugog<-as.data.frame(taxa_sums(ps_filtered_taxa))
+taxtableaugog<-as.data.frame(tax_table(ps_filtered_taxa))
+taxtableaugog <- tibble::rownames_to_column(taxtableaugog, "ASV")
+#check 1,2, 13
+#Frequency says keep all
+
+contamdf.freq <- isContaminant(psaug_OG, method="frequency", conc="quant_reading")
+table(contamdf.freq$contaminant)
+unique(which(contamdf.freq$contaminant))
+
+augogfreq <- as.data.frame(which(contamdf.freq$contaminant))
+
+augogfreq$ASV <-which(contamdf.freq$contaminant)
+
+augogfreq$ASV <- paste0("ASV", augogfreq$ASV)
+
+taxa_remove <- unique(c(augogfreq$ASV, taxtableaugog$ASV))
+
+# Define the ASVs to be kept
+ASVs_to_keep <- c("ASV1", "ASV2", "ASV13")
+
+# Remove the specified items from contaminant vector
+taxa_remove <- taxa_remove[!taxa_remove %in% ASVs_to_keep]
+
+augogcontam <- as.data.frame(taxa_remove)
+augogcontam$batch <- "augog"
+augogcontam$ASV <- augogcontam$taxa_remove
+augogtaxanames <- as.data.frame(tax_table(psaug_OG))
+augogtaxanames$ASV <- rownames(augogtaxanames)
+augogcontam <- merge(augogcontam, augogtaxanames, by= "ASV" ,all.x = TRUE )
+
+augogseqs  <- as.data.frame(refseq(psaug_OG))
+augogseqs$ASV<-rownames(augogseqs)
+augogseqs <- merge(augogcontam, augogseqs, by = "ASV", all.x = TRUE)
+
+# Remove them from phyloseq object
+psaugog_clean <- prune_taxa(!(taxa_names(psaug_OG) %in% taxa_remove), psaug_OG)
+
+# Check that they are gone
+taxa_names(psaugog_clean)[taxa_names(psaugog_clean) %in% taxa_remove]
+
+saveRDS(psaugog_clean, "/Users/rapiduser/Desktop/CH_DADATest/psaugog_clean.RDS")
+
+
+```
+
+### Decontam April 25
+
+```{r}
+
+
+psapril25negs <- subset_samples(psapril25, Sample_or_control == "Control")
+
+ps_filtered_taxa <- prune_taxa(taxa_sums(psapril25negs) >= 1000, psapril25negs)
+taxdataapril25<-as.data.frame(taxa_sums(ps_filtered_taxa))
+taxtableapril25<-as.data.frame(tax_table(ps_filtered_taxa))
+taxtableapril25 <- tibble::rownames_to_column(taxtableapril25, "ASV")
+#check 4, 31, 204
+#frequency says keep 4
+
+
+contamdf.freq <- isContaminant(psapril25, method="frequency", conc="quant_reading")
+table(contamdf.freq$contaminant)
+unique(which(contamdf.freq$contaminant))
+
+augapril25freq <- as.data.frame(which(contamdf.freq$contaminant))
+
+augapril25freq$ASV <-which(contamdf.freq$contaminant)
+
+augapril25freq$ASV <- paste0("ASV", augapril25freq$ASV)
+
+taxa_remove <- unique(c(augapril25freq$ASV, taxtableapril25$ASV))
+
+# Define the ASVs to be kept
+ASVs_to_keep <- c("ASV4")
+
+# Remove the specified items from contaminant vector
+taxa_remove <- taxa_remove[!taxa_remove %in% ASVs_to_keep]
+
+april25contam <- as.data.frame(taxa_remove)
+april25contam$batch <- "april25"
+april25contam$ASV <- april25contam$taxa_remove
+april25taxanames <- as.data.frame(tax_table(psapril25))
+april25taxanames$ASV <- rownames(april25taxanames)
+april25contam <- merge(april25contam, april25taxanames, by= "ASV" ,all.x = TRUE )
+
+aprilseqs  <- as.data.frame(refseq(psapril25))
+aprilseqs$ASV<-rownames(aprilseqs)
+aprilseqs <- merge(april25contam, aprilseqs, by = "ASV", all.x = TRUE)
+
+# Remove them from the phyloseq object
+psapril25_clean <- prune_taxa(!(taxa_names(psapril25) %in% taxa_remove), psapril25)
+
+# Check that they are gone
+taxa_names(psapril25_clean)[taxa_names(psapril25_clean) %in% taxa_remove]
+
+saveRDS(psapril25_clean, "/Users/rapiduser/Desktop/CH_DADATest/psapril25_clean.RDS")
+
+
+```
+
+### Decontam October
+
+```{r}
+
+
+psoctnegs <- subset_samples(psoct, Sample_or_Control == "Control")
+
+ps_filtered_taxa <- prune_taxa(taxa_sums(psoctnegs) >= 1000, psoctnegs)
+taxdataoct<-as.data.frame(taxa_sums(ps_filtered_taxa))
+taxtableoct<-as.data.frame(tax_table(ps_filtered_taxa))
+taxtableoct <- tibble::rownames_to_column(taxtableoct, "ASV")
+#Remove all
+
+
+contamdf.freq <- isContaminant(psoct, method="frequency", conc="quant_reading")
+table(contamdf.freq$contaminant)
+unique(which(contamdf.freq$contaminant))
+
+augoctfreq <- as.data.frame(which(contamdf.freq$contaminant))
+
+augoctfreq$ASV <-which(contamdf.freq$contaminant)
+
+augoctfreq$ASV <- paste0("ASV", augoctfreq$ASV)
+
+taxa_remove <- unique(c(augoctfreq$ASV, taxtableoct$ASV))
+
+octcontam <- as.data.frame(taxa_remove)
+octcontam$batch <- "oct"
+octcontam$ASV <- octcontam$taxa_remove
+octtaxanames <- as.data.frame(tax_table(psoct))
+octtaxanames$ASV <- rownames(octtaxanames)
+octcontam <- merge(octcontam, octtaxanames, by= "ASV" ,all.x = TRUE )
+
+octseqs  <- as.data.frame(refseq(psoct))
+octseqs$ASV<-rownames(octseqs)
+octseqs <- merge(octcontam, octseqs, by = "ASV", all.x = TRUE)
+
+# Remove them from the phyloseq object
+psoct_clean <- prune_taxa(!(taxa_names(psoct) %in% taxa_remove), psoct)
+
+# Check that they are gone
+taxa_names(psoct_clean)[taxa_names(psoct_clean) %in% taxa_remove]
+
+saveRDS(psoct_clean, "/Users/rapiduser/Desktop/CH_DADATest/psoct_clean.RDS")
+
+
+```
+
+
+```{r}
+
+psaugrerun_clean <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psaugrerun_clean.RDS")
+psaugog_clean <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psaugog_clean.RDS")
+psapril25_clean <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psapril25_clean.RDS")
+psoct_clean <-readRDS("/Users/rapiduser/Desktop/CH_DADATest/psoct_clean.RDS")
+
+samples_to_remove <- c("20250624-nasal-ExNeg1", "20250624-nasal-ExNeg2", "20250624-nasal-ExNeg3", "20250624-nasal-ExNeg4", "20250624-nasal-zymo", "Hurst20250624-nasal")
+psaugrerun_clean <- prune_samples(!(sample_names(psaugrerun_clean) %in% samples_to_remove), psaugrerun_clean)
+
+samples_to_remove <- c("Hurst20250605-ExNeg1", "Hurst20250605-ExNeg2", "Hurst20250605-ExNeg3", "Hurst20250605-ExNeg4", "Hurst20250605-ExNeg5", "Hurst20250605-PCRneg1", "Hurst20250605-PCRneg2")
+psaugog_clean <- prune_samples(!(sample_names(psaugog_clean) %in% samples_to_remove), psaugog_clean)
+
+samples_to_remove <- c( "ExNeg1", "ExNeg2", "ExNeg3", "ExNeg4", "ExNeg5")
+psapril25_clean <- prune_samples(!(sample_names(psapril25_clean) %in% samples_to_remove), psapril25_clean)
+
+samples_to_remove <- c( "ExNeg1", "ExNeg2", "ExNeg3")
+psoct_clean <- prune_samples(!(sample_names(psoct_clean) %in% samples_to_remove), psoct_clean)
+
+sdaug1 <- as.data.frame(sample_data(psaugog_clean))
+sdaug1$Batch <- "aug25_1"
+sample_data(psaugog_clean) <- sample_data(sdaug1)
+
+sdaug2 <- as.data.frame(sample_data(psaugrerun_clean))
+sdaug2$Batch <- "aug25_2"
+sample_data(psaugrerun_clean) <- sample_data(sdaug2)
+
+sda1 <- as.data.frame(sample_data(psapril25_clean))
+sda1$Batch <- "Apr25"
+sample_data(psapril25_clean) <- sample_data(sda1)
+
+sdo1 <- as.data.frame(sample_data(psoct_clean))
+sdo1$Batch <- "Oct24"
+sample_data(psoct_clean) <- sample_data(sdo1)
+
+pstest <- merge_phyloseq(psaugrerun_clean, psaugog_clean,psapril25_clean, psoct_clean )
+pstest
+
+augreseqs <- augreseqs %>% 
+  select(Kingdom,x)
+
+augogseqs <- augogseqs %>% 
+  select(Kingdom,x)
+
+aprilseqs <- aprilseqs %>% 
+  select(Kingdom,x)
+
+octseqs <- octseqs %>% 
+  select(Kingdom,x)
+
+allseqs <- rbind(augreseqs, augogseqs, aprilseqs, octseqs )
+
+ASVID <- as.data.frame(refseq(pstest))
+ASVID$ASV<-rownames(ASVID)
+
+alltoremove <- merge(allseqs, ASVID, by = "x", all.x = TRUE)
+
+# Remove them from the phyloseq object
+pstest <- prune_taxa(!(taxa_names(pstest) %in% alltoremove$ASV), pstest)
+
+# Check that they are gone
+taxa_names(pstest)[taxa_names(pstest) %in% alltoremove]
+
+taxakey <- as.data.frame(tax_table(pscontam))
+
+taxakey$ASV <- rownames(taxakey)
+
+genera_to_remove <- c(
+  "Dietzia", "Bergeyella", "Arthrospira", "Cupriavidus", "Pedobacter", "Jeotgalicoccus", "Sanguibacter","Acidovorax", "Caldilinea", "Agrobacterium", "Segetibacter",
+  "Mesorhizobium", "Lysinibacillus", "Bradyrhizobium",
+  "Enhydrobacter", "Porphyrobacter", "Defluvibacter", "Erythromicrobium", "Bosea", "Anoxybacillus", "Flavitalea")
+
+tax_df <- as.data.frame(tax_table(pstest))
+
+taxa_keep <- rownames(tax_df)[!(tax_df$Genus %in% genera_to_remove)]
+
+pstest <- prune_taxa(taxa_keep, pstest)
+
+pstest <- prune_samples(!(sample_sums(pstest) < 1000), pstest)
+
+summary(sample_sums(pstest))
+
+ps_birth <- subset_samples(pstest, Subject %in% BetMet$Subject)
+
+saveRDS(ps_birth, "/Users/rapiduser/Desktop/CH_DADATest/ps_birth.RDS")
+
+```
+
+
