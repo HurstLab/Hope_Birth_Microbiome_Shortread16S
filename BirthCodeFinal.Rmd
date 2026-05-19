@@ -1,0 +1,1856 @@
+---
+title: "FinalCodeBirth"
+output: html_document
+date: "2026-04-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(ggplot2)
+library(survival)
+library(survminer)
+library(dplyr)
+library(gt)
+library(car)
+library(contsurvplot)
+library(factoextra)
+library(ggpubr)
+library(RColorBrewer)
+library(riskRegression)
+library(pammtools)
+library(gtsummary)
+library(purrr)
+library(cowplot)
+library(phyloseq)
+library(tidyverse)
+library(dplyr)
+library(DT)
+library(decontam)
+library(vegan)
+library(scales)
+library(lubridate)
+library(microbiome)
+library(gtsummary)
+library(reshape2)
+library(broom)
+library(clusterCrit)
+library(clusterSim)
+library(ade4)
+
+
+set.seed(1234)
+
+
+```
+
+MetaData and attach to phyloseq
+```{r}
+
+ps_birth <-readRDS("/Users/rapiduser/Desktop/HOPE_Manuscript/ps_birth.RDS")
+
+birthmeta <- read_csv("/Users/rapiduser/Desktop/HOPE_Manuscript/16Sbirthmeta.csv")
+
+ps_birth <- prune_taxa(!(taxa_sums(ps_birth) < 1), ps_birth)
+
+birthmeta <- as.data.frame(birthmeta)
+
+rownames(birthmeta) <- birthmeta$Subject
+
+birthmeta_sampdata = sample_data(birthmeta)
+
+sample_data(ps_birth) <- birthmeta_sampdata
+
+milkbox <- read_csv("/Users/rapiduser/Desktop/HOPE_Manuscript/milkboxtransfer.csv")
+
+```
+
+Compute alpha diversity
+```{r}
+
+alpha_div <- estimate_richness(ps_birth, measures = c("Shannon", "Observed")) %>%
+  rownames_to_column("named")
+
+meta <- sample_data(ps_birth) %>%
+  data.frame(.) %>%
+  rownames_to_column("named")
+
+meta$named <- gsub("-", ".", meta$named)
+
+# Join together
+alpha_div_meta <- left_join(alpha_div, meta, by = "named")
+
+alpha_div_meta <- alpha_div_meta %>% 
+  mutate(type_of_feeding_at_dischar = case_when(type_of_feeding_at_dischar == "Both"~"Breast Milk", 
+                                                TRUE~type_of_feeding_at_dischar))
+alpha_div_meta <- alpha_div_meta %>% 
+  mutate(
+    Mode.of.delivery = case_when(
+      Mode.of.delivery == "Cesarean delivery" ~ "Cesarean",
+      Mode.of.delivery == "Vaginal delivery" ~ "Vaginal",
+      TRUE ~ Mode.of.delivery),
+    Mode.of.delivery = factor(
+      Mode.of.delivery,
+      levels = c("Vaginal", "Cesarean")))
+
+wilcox.test(Observed ~ Mode.of.delivery, data = alpha_div_meta, var.equal = TRUE)
+wilcox.test(Shannon ~ Mode.of.delivery, data = alpha_div_meta, var.equal = TRUE)
+
+wilcox.test(Observed ~ abxindicate, data = alpha_div_meta, var.equal = TRUE)
+wilcox.test(Shannon ~ abxindicate, data = alpha_div_meta, var.equal = TRUE)
+
+wilcox.test(Observed ~ type_of_feeding_at_dischar, data = alpha_div_meta)
+wilcox.test(Shannon ~ type_of_feeding_at_dischar, data = alpha_div_meta)
+
+alpha_div_meta %>% 
+  filter(type_of_feeding_at_dischar == "Formula") %>% 
+  summarise(
+    q25 = quantile(Observed, 0.25, na.rm = TRUE),
+    median = quantile(Observed, 0.5, na.rm = TRUE),
+    q75 = quantile(Observed, 0.75, na.rm = TRUE))
+
+alpha_div_meta %>% 
+  filter(type_of_feeding_at_dischar == "Breast Milk") %>% 
+  summarise(
+    q25 = quantile(Observed, 0.25, na.rm = TRUE),
+    median = quantile(Observed, 0.5, na.rm = TRUE),
+    q75 = quantile(Observed, 0.75, na.rm = TRUE))
+
+alpha_div_meta %>% 
+  filter(type_of_feeding_at_dischar == "Formula") %>% 
+  summarise(
+    q25 = quantile(Shannon, 0.25, na.rm = TRUE),
+    median = quantile(Shannon, 0.5, na.rm = TRUE),
+    q75 = quantile(Shannon, 0.75, na.rm = TRUE))
+
+alpha_div_meta %>% 
+  filter(type_of_feeding_at_dischar == "Breast Milk") %>% 
+  summarise(
+    q25 = quantile(Shannon, 0.25, na.rm = TRUE),
+    median = quantile(Shannon, 0.5, na.rm = TRUE),
+    q75 = quantile(Shannon, 0.75, na.rm = TRUE))
+
+
+```
+
+Presence/Absence 
+```{r}
+ps_genus <- tax_glom(ps_birth, taxrank = "Genus", NArm = FALSE)
+
+ps_relative <- transform_sample_counts(ps_genus, function(x) x/sum(x))
+
+genus_df <- psmelt(ps_relative)
+    
+strep_abundance <- genus_df %>%
+      filter(Genus %in% c("Streptococcus", "Staphylococcus", "Haemophilus", "Dolosigranulum", "Moraxella", "Corynebacterium")) %>%
+      dplyr::select(Subject, Genus, Abundance)
+
+strepabundOM <- merge(alpha_div_meta, strep_abundance, by = "Subject")
+
+strepabundOM <- strepabundOM %>% 
+  mutate(anyindicate = case_when(Abundance == 0~"No",
+                                   Abundance > 0~"Yes"))
+
+strepabundOM <- strepabundOM %>%
+  mutate(anyindicate_num = ifelse(anyindicate == "Yes", 1, 0))
+
+strepabundOM$abxindicate <- factor(
+  strepabundOM$abxindicate,
+  levels = c("No", "Yes"))
+
+genera_keep <- c("Streptococcus","Staphylococcus","Haemophilus","Dolosigranulum","Moraxella", "Corynebacterium")
+
+genus_counts <- strepabundOM %>%
+  filter(Genus %in% genera_keep) %>%
+  group_by(Genus, abxindicate) %>%
+  summarise(
+    successes = sum(anyindicate_num, na.rm = TRUE),
+    total = n(),
+    .groups = "drop") %>%
+  mutate(prop = successes / total)
+
+
+prop_results <- genus_counts %>%
+  group_by(Genus) %>%
+  summarise(
+    diff_prop = prop[1] - prop[2],
+    chisq = prop.test(x = successes, n = total, correct = FALSE)$statistic,
+    p_value = prop.test(x = successes,n = total,correct = FALSE)$p.value,
+    .groups = "drop")
+
+final_results <- genus_counts %>%
+  left_join(prop_results, by = "Genus")
+
+final_results
+
+#Switch to mode of delivery
+genus_counts <- strepabundOM %>%
+  filter(Genus %in% genera_keep) %>%
+  group_by(Genus, Mode.of.delivery) %>%
+  summarise(
+    successes = sum(anyindicate_num, na.rm = TRUE),
+    total = n(),
+    .groups = "drop") %>%
+  mutate(prop = successes / total)
+
+prop_results <- genus_counts %>%
+  group_by(Genus) %>%
+  summarise(diff_prop = prop[1] - prop[2],
+    chisq = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$statistic,
+    p_value = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$p.value,
+    conf_low = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$conf.int[1],
+    conf_high = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$conf.int[2],
+    .groups = "drop")
+
+final_results <- genus_counts %>%
+  left_join(prop_results, by = "Genus")
+
+final_results
+
+#Switch to Breastfeeding
+genus_counts <- strepabundOM %>%
+  filter(Genus %in% genera_keep) %>%
+  group_by(Genus, type_of_feeding_at_dischar) %>%
+  summarise(
+    successes = sum(anyindicate_num, na.rm = TRUE),
+    total = n(),
+    .groups = "drop") %>%
+  mutate(prop = successes / total)
+
+
+prop_results <- genus_counts %>%
+  group_by(Genus) %>%
+  summarise(
+    diff_prop = prop[1] - prop[2],
+    chisq = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$statistic,
+    p_value = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$p.value,
+    conf_low = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$conf.int[1],
+    conf_high = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$conf.int[2],
+    .groups = "drop")
+
+final_results <- genus_counts %>%
+  left_join(prop_results, by = "Genus")
+
+final_results
+
+#Switch to Breastfeeding
+genus_counts <- strepabundOM %>%
+  filter(Genus %in% genera_keep) %>%
+  group_by(Genus) %>%
+  summarise(
+    successes = sum(anyindicate_num, na.rm = TRUE),
+    total = n(),
+    .groups = "drop") %>%
+  mutate(prop = successes / total)
+
+
+prop_results <- genus_counts %>%
+  group_by(Genus) %>%
+  summarise(
+    diff_prop = prop[1] - prop[2],
+    chisq = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$statistic,
+    p_value = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$p.value,
+    conf_low = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$conf.int[1],
+    conf_high = prop.test(
+      x = successes,
+      n = total,
+      correct = FALSE)$conf.int[2],
+    .groups = "drop")
+
+final_results <- genus_counts %>%
+  left_join(prop_results, by = "Genus")
+
+final_results
+
+genus_counts <- strepabundOM %>%
+  filter(Genus %in% genera_keep) %>%
+  group_by(Genus, abxindicate) %>%
+  summarise(
+    successes = sum(anyindicate_num, na.rm = TRUE),
+    total = n(),
+    .groups = "drop") %>%
+  mutate(prop = successes / total)
+
+# Counts for Haem
+streptab <- strepabundOM %>%
+  filter(Genus == "Streptococcus") %>% 
+  group_by(Mode.of.delivery) %>%
+  summarise(
+    successes = sum(anyindicate_num),
+    total = n())
+
+prop.test(
+  x = streptab$successes,
+  n = streptab$total,
+  correct = FALSE)
+
+prop.test(streptab$successes, streptab$total, correct = FALSE)
+
+# Counts for each Staph
+staphtab <- strepabundOM %>%
+  filter(Genus == "Staphylococcus") %>% 
+  group_by(Mode.of.delivery) %>%
+  summarise(
+    successes = sum(anyindicate_num),
+    total = n())
+
+prop.test(
+  x = staphtab$successes,
+  n = staphtab$total,
+  correct = FALSE)
+
+prop.test(staphtab$successes, staphtab$total, correct = FALSE)
+```
+
+Relative Abundance MoD Plot
+```{r}
+ps.NP.r = transform_sample_counts(ps_birth,function(x) x/sum(x))
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+ps.Genus = tax_glom(ps.NP.r, taxrank = "Genus") 
+
+genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+Top = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$Mode.of.delivery == "Cesarean delivery")
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+AvgDF1 = genusDF$C1 / sum(genusDF$C1)
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$Mode.of.delivery == "Vaginal delivery")
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+AvgDF2 = genusDF$C1 / sum(genusDF$C1)
+
+AvgDF = cbind(Top, AvgDF1, AvgDF2) %>%
+  data.frame(.)
+
+rownames(AvgDF) = rownames(genusDF)
+
+AvgDF$Avg = rowMeans(AvgDF)
+
+fig = top_n(AvgDF, 30, Top)
+
+fig <- fig %>% 
+  dplyr::select(AvgDF1, AvgDF2, Avg)
+
+Other = 1 - colSums(fig)
+
+fig = rbind(fig, Other)
+
+fig$tax = rownames(fig)
+
+fig <- fig %>% 
+  mutate(taxfix = case_when(tax == "31"~ "Other", 
+                            tax == tax ~tax))
+
+fig = dplyr::select(fig, -Avg) %>%
+  dplyr::rename('Cesarean delivery' = AvgDF1,
+                'Vaginal delivery' = AvgDF2)
+
+f = melt(fig) 
+
+mycolors <- c(
+  "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a",
+  "#b15928", "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f",
+  "#cab2d6", "#ffff99", "#8dd3c7", "#ffffb3", "#bebada",
+  "#fb8072", "#80b1d3", "#fdb462", "#b3de69", "#fccde5",
+  "#a6d854", "#bc80bd", "#ccebc5", "#ffed6f", "#66c2a5",
+  "#fc8d62", "#8da0cb", "#e78ac3", "black", "#ffd92f",
+  "gray")
+
+f$taxfix <- factor(f$taxfix, levels = c(
+  "Acinetobacter", "Anoxybacillus", "Bacillus", "Bacteroidetes_[G-6]",
+  "Capnocytophaga", "Corynebacterium", "Cupriavidus", "Dolosigranulum",
+  "Enterococcus", "Fastidiosipila", "Fusobacterium",
+  "Gardnerella", "Haemophilus", "Kocuria", "Lactobacillus",
+  "Leptotrichia", "Microbacterium", "Micrococcus", "Moraxella",
+  "Neisseria", "Novosphingobium", "Paracoccus", "Pedobacter",
+  "Porphyromonas", "Prevotella", "Pseudomonas", "Roseomonas",
+  "Rothia", "Sphingomonas", "Staphylococcus", "Stenotrophomonas",
+  "Streptococcus", "Veillonella",
+  "Other"))
+
+RAMoD=ggplot(f, aes(fill = taxfix, y=value, x=variable)) +
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
+  scale_fill_manual(values = mycolors) +
+  xlab("Mode of Delivery") +
+  ylab("Mean Relative Abundance") +
+  labs(fill = "Genera", title = "") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+  theme(legend.key.size = unit(0.4, "cm"),
+    legend.text     = element_text(size = 9),
+    legend.title    = element_text(size = 9))
+RAMoD
+
+```
+
+Relative Abundance ABX Plot
+```{r}
+
+ps.NP.r = transform_sample_counts(ps_birth,function(x) x/sum(x))
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+ps.Genus = tax_glom(ps.NP.r, taxrank = "Genus") 
+
+genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+Top = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$abxindicate == "Yes")
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+AvgDF1 = genusDF$C1 / sum(genusDF$C1)
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$abxindicate == "No")
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+AvgDF2 = genusDF$C1 / sum(genusDF$C1)
+
+AvgDF = cbind(Top, AvgDF1, AvgDF2) %>%
+  data.frame(.)
+
+rownames(AvgDF) = rownames(genusDF)
+
+AvgDF$Avg = rowMeans(AvgDF)
+
+fig = top_n(AvgDF, 30, Top)
+
+fig <- fig %>% 
+  dplyr::select(AvgDF1, AvgDF2, Avg)
+
+Other = 1 - colSums(fig)
+
+fig = rbind(fig, Other)
+
+fig$tax = rownames(fig)
+
+fig <- fig %>% 
+  mutate(taxfix = case_when(tax == "31"~ "Other", 
+                            tax == tax ~tax))
+
+fig = dplyr::select(fig, -Avg) %>%
+  dplyr::rename('Yes' = AvgDF1,
+                'No' = AvgDF2)
+
+f = melt(fig) 
+
+mycolors <- c(
+  "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a",
+  "#b15928", "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f",
+  "#cab2d6", "#ffff99", "#8dd3c7", "#ffffb3", "#bebada",
+  "#fb8072", "#80b1d3", "#fdb462", "#b3de69", "#fccde5",
+  "#a6d854", "#bc80bd", "#ccebc5", "#ffed6f", "#66c2a5",
+  "#fc8d62", "#8da0cb", "#e78ac3", "black", "#ffd92f",
+  "gray")
+
+f$taxfix <- factor(f$taxfix, levels = c(
+  "Acinetobacter", "Anoxybacillus", "Bacillus", "Bacteroidetes_[G-6]",
+  "Capnocytophaga", "Corynebacterium", "Cupriavidus", "Dolosigranulum",
+  "Enterococcus", "Fastidiosipila", "Fusobacterium",
+  "Gardnerella", "Haemophilus", "Kocuria", "Lactobacillus",
+  "Leptotrichia", "Microbacterium", "Micrococcus", "Moraxella",
+  "Neisseria", "Novosphingobium", "Paracoccus", "Pedobacter",
+  "Porphyromonas", "Prevotella", "Pseudomonas", "Roseomonas",
+  "Rothia", "Sphingomonas", "Staphylococcus", "Stenotrophomonas",
+  "Streptococcus", "Veillonella",
+  "Other"))
+
+RAABX=ggplot(f, aes(fill = taxfix, y=value, x=variable)) +
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
+  scale_fill_manual(values = mycolors) +
+  xlab("Intrapartum Antibiotics") +
+  ylab("Mean Relative Abundance") +
+  labs(fill = "Genera") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text     = element_text(size = 9),
+    legend.title    = element_text(size = 9))
+
+RAABX
+
+```
+
+Relative Abundance Feed Plot
+```{r}
+
+ps.NP.r = transform_sample_counts(ps_birth,function(x) x/sum(x))
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+ps.Genus = tax_glom(ps.NP.r, taxrank = "Genus") 
+
+genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+Top = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$type_of_feeding_at_dischar == "Breast Milk")
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+AvgDF1 = genusDF$C1 / sum(genusDF$C1)
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$type_of_feeding_at_dischar == "Formula")
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+AvgDF2 = genusDF$C1 / sum(genusDF$C1)
+
+AvgDF = cbind(Top, AvgDF1, AvgDF2) %>%
+  data.frame(.)
+
+rownames(AvgDF) = rownames(genusDF)
+
+AvgDF$Avg = rowMeans(AvgDF)
+
+fig = top_n(AvgDF, 30, Top)
+
+fig <- fig %>% 
+  dplyr::select(AvgDF1, AvgDF2, Avg)
+
+Other = 1 - colSums(fig)
+
+fig = rbind(fig, Other)
+
+fig$tax = rownames(fig)
+
+fig <- fig %>% 
+  mutate(taxfix = case_when(tax == "31"~ "Other", 
+                            tax == tax ~tax))
+
+fig = dplyr::select(fig, -Avg) %>%
+  dplyr::rename('Breast Milk' = AvgDF1,
+                'Formula' = AvgDF2)
+
+f = melt(fig) 
+
+mycolors <- c(
+  "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a",
+  "#b15928", "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f",
+  "#cab2d6", "#ffff99", "#8dd3c7", "#ffffb3", "#bebada",
+  "#fb8072", "#80b1d3", "#fdb462", "#b3de69", "#fccde5",
+  "#a6d854", "#bc80bd", "#ccebc5", "#ffed6f", "#66c2a5",
+  "#fc8d62", "#8da0cb", "#e78ac3", "black", "#ffd92f",
+  "gray")
+
+f$taxfix <- factor(f$taxfix, levels = c(
+  "Acinetobacter", "Anoxybacillus", "Bacillus", "Bacteroidetes_[G-6]",
+  "Capnocytophaga", "Corynebacterium", "Cupriavidus", "Dolosigranulum",
+  "Enterococcus", "Fastidiosipila", "Fusobacterium",
+  "Gardnerella", "Haemophilus", "Kocuria", "Lactobacillus",
+  "Leptotrichia", "Microbacterium", "Micrococcus", "Moraxella",
+  "Neisseria", "Novosphingobium", "Paracoccus", "Pedobacter",
+  "Porphyromonas", "Prevotella", "Pseudomonas", "Roseomonas",
+  "Rothia", "Sphingomonas", "Staphylococcus", "Stenotrophomonas",
+  "Streptococcus", "Veillonella",
+  "Other"))
+
+RAfeed=ggplot(f, aes(fill = taxfix, y=value, x=variable)) +
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
+  scale_fill_manual(values = mycolors) +
+  xlab("Feeding at Discharge") +
+  ylab("Mean Relative Abundance") +
+  labs(fill = "Genera") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text     = element_text(size = 9),
+    legend.title    = element_text(size = 9))
+RAfeed
+
+RAfeed_mod <- RAfeed +
+  guides(fill = guide_legend(ncol = 3, byrow = TRUE)) +
+  theme(legend.position = "right")
+
+```
+
+```{r}
+ps_genus <- tax_glom(ps_birth, taxrank = "Genus", NArm = FALSE)
+seq.rel <- microbiome::transform(ps_genus, "compositional")
+ASV <- abundances(pseq.rel)
+meta <- meta(pseq.rel)
+
+permanovaMOD <- adonis2(t(ASV) ~ Mode.of.delivery,
+               data = meta, permutations=99, method = "bray")
+permanovaMOD
+
+
+permanovaABX <- adonis2(t(ASV) ~ abxindicate,
+               data = meta, permutations=99, method = "bray")
+permanovaABX
+
+
+permanovaFEED <- adonis2(t(ASV) ~ type_of_feeding_at_dischar,
+               data = meta, permutations=99, method = "bray")
+permanovaFEED
+
+
+```
+
+
+Figure 1
+```{r}
+
+ShannnonMoD <- ggplot(alpha_div_meta, aes(x = Mode.of.delivery, y = Shannon)) +
+  geom_violin(aes(fill = Mode.of.delivery),trim = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.8) +
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.35,
+    linewidth = 0.9)+
+  labs(x = "Mode of Delivery", y = "Shannon Diversity", fill = "Mode of Delivery")+
+  theme_bw()+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9))
+
+ObservedMoD <- ggplot(alpha_div_meta, aes(x = Mode.of.delivery, y = Observed)) +
+  geom_violin(aes(fill = Mode.of.delivery),trim = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.8) +
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.35,
+    linewidth = 0.9)+
+  labs(x = "Mode of Delivery", y = "Richness", fill = "Mode of Delivery")+
+  theme_bw()+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9))
+
+ShannonABX <- ggplot(alpha_div_meta, aes(x = abxindicate, y = Shannon)) +
+  geom_violin(aes(fill = abxindicate),trim = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.8) +
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.35,
+    linewidth = 0.9)+
+  labs(x = "Intrapartum Antibiotics", y = "Shannon Diversity", fill = "Intrapartum Antibiotics")+
+  theme_bw()+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9))
+
+ObservedABX <- ggplot(alpha_div_meta, aes(x = abxindicate, y = Observed)) +
+  geom_violin(aes(fill = abxindicate), trim = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.8) +
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.35,
+    linewidth = 0.9) +
+  labs(x = "Intrapartum Antibiotics", y = "Richness", fill = "Intrapartum Antibiotics") +
+  theme_bw() +
+   theme(legend.key.size = unit(0.4, "cm"),
+    legend.text  = element_text(size = 9),
+    legend.title = element_text(size = 9))
+
+ShannonFeed <- ggplot(alpha_div_meta, aes(x = type_of_feeding_at_dischar, y = Shannon)) +
+  geom_violin(aes(fill = type_of_feeding_at_dischar),trim = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.8) +
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.35,
+    linewidth = 0.9)+
+  labs(x = "Feeding at Discharge", y = "Shannon Diversity", fill = "Feeding at Discharge")+
+  theme_bw()+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9))
+
+ObservedFeed <- ggplot(alpha_div_meta, aes(x = type_of_feeding_at_dischar, y = Observed)) +
+  geom_violin(aes(fill = type_of_feeding_at_dischar),trim = TRUE) +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.8) +
+  stat_summary(
+    fun = median,
+    geom = "crossbar",
+    width = 0.35,
+    linewidth = 0.9)+
+  labs(x = "Feeding at Dischargee", y = "Richness", fill = "Feeding at Discharge")+
+  theme_bw()+ theme(legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9))
+
+strep_summary <- strepabundOM %>% 
+  mutate(anyindicate_num = ifelse(anyindicate == "Yes", 1, 0)) %>% 
+  group_by(Genus, Mode.of.delivery) %>% 
+  summarise(
+    mean_strep = mean(anyindicate_num, na.rm = TRUE),
+    se_strep   = sd(anyindicate_num, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+GDMoD <- ggplot(strep_summary, aes(x = Genus, y = mean_strep, fill = Mode.of.delivery)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+ labs(title = "", x = "Genera", y = "Proportion", fill = "Mode of Delivery")+
+  theme_bw() +
+  theme(legend.key = element_rect(color = "black", size = 0.3),
+    legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9),
+    axis.text.x = element_text(angle = 25, hjust = 1, vjust = 1))
+
+strep_summary <- strepabundOM %>% 
+  mutate(anyindicate_num = ifelse(anyindicate == "Yes", 1, 0)) %>% 
+  group_by(Genus, abxindicate) %>% 
+  summarise(
+    mean_strep = mean(anyindicate_num, na.rm = TRUE),
+    se_strep   = sd(anyindicate_num, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+GDABX <- ggplot(strep_summary, aes(x = Genus, y = mean_strep, fill = abxindicate)) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  labs(title = "", x = "Genera",y = "Proportion", fill = "Intrapartum Antibiotics")+
+  theme_bw() +
+  theme(legend.key = element_rect(color = "black", size = 0.3),
+    legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9),
+    axis.text.x = element_text(angle = 25, hjust = 1, vjust = 1))
+
+strep_summary <- strepabundOM %>% 
+  mutate(anyindicate_num = ifelse(anyindicate == "Yes", 1, 0)) %>% 
+  group_by(Genus, type_of_feeding_at_dischar) %>% 
+  summarise(
+    mean_strep = mean(anyindicate_num, na.rm = TRUE),
+    se_strep   = sd(anyindicate_num, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+
+GDFeed <- ggplot(strep_summary, aes(x = Genus, y = mean_strep, fill = type_of_feeding_at_dischar)) +
+  geom_col(position = position_dodge(width = 0.9)) + 
+  labs(title = "", x = "Genera", y = "Proportion", fill = "Feeding at Discharge")+
+  theme_bw() +
+  theme(legend.key = element_rect(color = "black", size = 0.3),
+    legend.key.size = unit(0.4, "cm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9),
+    axis.text.x = element_text(angle = 25, hjust = 1, vjust = 1))
+
+MoDFig <- plot_grid(
+  plot_grid(
+    ObservedMoD,
+    ShannnonMoD,
+    GDMoD,
+    ncol = 1,
+    labels = c("A", "B", "C"),
+    align = "v"),
+  plot_grid(NULL,RAMoD,NULL,
+    ncol = 1,
+    labels = c("", "D", ""),label_y = 1, label_x = -0.01,rel_heights = c(1, 3, 1)),
+  ncol = 2,
+  rel_widths = c(1, 1),
+  align = "v")
+
+ggsave(
+  filename = "MoDFig.png",
+  plot = MoDFig,
+  width = 12,
+  height = 10,
+  dpi = 300)
+
+ABXFig <- plot_grid(
+  plot_grid(
+    ObservedABX,
+    ShannonABX,
+    GDABX,
+    ncol = 1,
+    labels = c("A", "B", "C"),
+    align = "v"),
+  plot_grid(NULL,RAABX,NULL,
+    ncol = 1,
+    labels = c("", "D", ""),label_y = 1, label_x = -0.01,rel_heights = c(1, 3, 1)),
+  ncol = 2,
+  rel_widths = c(1, 1),
+  align = "v")
+
+ggsave(
+  filename = "ABXFig.png",
+  plot = ABXFig,
+  width = 12,
+  height = 10,
+  dpi = 300)
+
+feedFig <- plot_grid(
+  plot_grid(
+    ObservedFeed,
+    ShannonFeed,
+    GDFeed,
+    ncol = 1,
+    labels = c("A", "B", "C"),
+    align = "v"),
+  plot_grid(
+    NULL,
+    RAfeed,
+    NULL,
+    ncol = 1,
+    labels = c("", "D", ""),
+    label_y = 1,  
+    label_x = -0.01,
+    rel_heights = c(1, 3, 1)),
+  ncol = 2,
+  rel_widths = c(1, 1),
+  align = "v")
+
+ggsave(
+  filename = "feedFig.png",
+  plot = feedFig,
+  width = 12,
+  height = 10,
+  dpi = 300, 
+  bg = "white")
+
+plot_grid(
+  ObservedMoD,
+  ShannnonMoD,
+  GDMoD, 
+  RAMoD,
+  ObservedABX,
+  ShannonABX,
+  GDABX,
+  RAABX,
+  ObservedFeed,
+  ShannonFeed,
+  GDFeed,
+  RAfeed,
+  ncol = 4, labels = c("A","B","C","D","E","F", "G","H","I","J","K","L"), label_fontface = "bold")
+
+nol <- theme(legend.position = "none")
+
+ObservedMoD  <- ObservedMoD  + nol
+ShannnonMoD  <- ShannnonMoD  + nol
+
+
+ObservedABX  <- ObservedABX  + nol
+ShannonABX   <- ShannonABX   + nol
+
+
+ObservedFeed <- ObservedFeed + nol
+ShannonFeed  <- ShannonFeed  + nol
+
+topl <- theme(legend.position = "top")
+
+GDMoD <- GDMoD + topl
+GDABX  <- GDABX  + topl
+GDFeed <- GDFeed + topl
+
+GDMoD  <- GDMoD  + labs(fill = NULL, color = NULL)
+GDABX  <- GDABX  + labs(fill = NULL, color = NULL)
+GDFeed <- GDFeed + labs(fill = NULL, color = NULL)
+
+nol <- theme(legend.position = "none")
+RAMoD  <- RAMoD  + nol
+RAABX  <- RAABX  + nol
+RAfeed <- RAfeed + nol
+
+RA_legend <- get_legend(
+  RAMoD +
+    theme(
+      legend.position = "right",
+      legend.key.height = unit(0.6, "cm"),
+      legend.spacing.y = unit(0.5, "cm")))
+
+RA_legend_plot <- ggdraw(RA_legend)
+
+exposfigall <- plot_grid(plot_grid(
+  ObservedMoD,  ShannnonMoD,  GDMoD,    RAMoD,
+  ObservedABX,  ShannonABX,   GDABX,    RAABX,
+  ObservedFeed, ShannonFeed,  GDFeed,   RAfeed,
+  ncol = 4,
+  labels = c("A","B","C","D","E","F","G","H","I", "J", "K", "L"),
+  label_fontface = "bold"), plot_grid(
+    NULL,
+    RA_legend_plot,
+    NULL,
+    ncol = 1,
+    labels = c("", "", ""),
+    label_y = 1,  
+    label_x = -0.01,
+    rel_heights = c(0, 1, 0)),
+  ncol = 2,
+rel_heights = c(1, 2),
+  rel_widths = c(1, 0.3),
+  align = "v")
+
+exposfigall
+
+ggsave(
+  filename = "exposefigall.png",
+  plot = exposfigall,
+  width = 17,
+  height = 12,
+  units = "in",
+  dpi = 300, 
+  limitsize = FALSE)
+
+```
+
+Figure 2 - Exposure cox models and forest plots
+```{r}
+
+cox_MoD <- coxph(Surv(time_2yr, OM_2yr) ~ Mode.of.delivery+RACEETH, data = alpha_div_meta)
+sf_MoD <- survfit(Surv(time_2yr, OM_2yr) ~ Mode.of.delivery, data = alpha_div_meta)
+p_MoD <- ggsurvplot(sf_MoD, data = alpha_div_meta,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "",
+                       legend.labs = c("Vaginal", "Cesarean"),
+                       title = "Mode of Delivery")$plot
+p_MoD
+
+cox_ABX <- coxph(Surv(time_2yr, OM_2yr) ~ abxindicate+RACEETH, data = alpha_div_meta)
+sf_ABX <- survfit(Surv(time_2yr, OM_2yr) ~ abxindicate, data = alpha_div_meta)
+p_ABX <- ggsurvplot(sf_ABX, data = alpha_div_meta,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "",
+                       legend.labs = c("No", "Yes"),
+                       title = "Intrapartum Antibiotics")$plot
+p_ABX
+
+milkbox <- milkbox %>% 
+  mutate(AOMstatus = case_when(Any_AOM_bf_24mth == "Yes"~1,
+                               Any_AOM_bf_24mth == "No"~0))
+
+cox_feed <- coxph(Surv(timeto, AOMstatus) ~ mixBMin6 + Intra_anti_flag+MODclean+RACEETH+WC_cnt_bf_2yr+GA_WEEK_DAYS_NUM, data = milkbox)
+sf_feed <- survfit(Surv(timeto, AOMstatus) ~ mixBMin6, data = milkbox)
+p_feed <- ggsurvplot(sf_feed, data = milkbox,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "",
+                       legend.labs = c("Breast Milk", "Formula"),
+                       title = "Feeding Type")$plot
+p_feed
+
+cox_models <- list(
+  "Cesarean Delivery" = cox_MoD,
+  "Intrapartum Antibiotics" = cox_ABX,
+  "Feeding Type" = cox_feed)
+
+
+exposure_order <- c(
+  "Cesarean Delivery",
+  "Intrapartum Antibiotics",
+  "Feeding Type")
+
+forest_df <- map_dfr(names(cox_models), function(exposure) {
+  tidy(cox_models[[exposure]]) %>%
+    filter(term != "(Intercept)") %>%
+    slice(1) %>%
+    mutate(
+      Exposure = exposure,
+      HR = exp(estimate),
+      HR_lower = exp(estimate - 1.96 * std.error),
+      HR_upper = exp(estimate + 1.96 * std.error)) %>%
+    dplyr::select(Exposure, HR, HR_lower, HR_upper)}) %>%
+  mutate(Exposure = factor(Exposure, levels = rev(exposure_order)))
+
+# Forest plot 
+ExposForest <- ggplot(forest_df, aes(x = Exposure, y = HR, ymin = HR_lower, ymax = HR_upper)) +
+  geom_pointrange(size = 1) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  labs(y = "Hazard Ratio (95% CI)", x = "Exposure", title = "", color = "") +
+  theme_bw(base_size = 14) +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1))
+
+ggsave(
+  filename = "ExposForest.png",
+  plot = ExposForest,
+  width = 8,
+  height = 6,
+  dpi = 300)
+
+exposurefig <- plot_grid(
+  p_MoD,
+  p_ABX,
+  p_feed,
+  ExposForest,
+  ncol = 2,
+  labels = c("A","B","C","D"),
+  label_fontface = "bold")
+exposurefig
+
+ggsave(
+  filename = "exposurefig.png",
+  plot = exposurefig,
+  width = 12,
+  height = 10,
+  dpi = 300)
+
+```
+
+Alpha Diversity Survival Analysis
+```{r}
+cox_shannon <- coxph(Surv(time_2yr, OM_2yr) ~ Shannon+hrstonas, data = alpha_div_meta, x=TRUE)
+cox_shannon
+summary(cox_shannon)
+
+p_shannon <-plot_surv_area(time="time_2yr",
+               status="OM_2yr",
+               variable="Shannon",
+               data=alpha_div_meta,
+               model=cox_shannon, 
+               title = "Shannon Index", 
+               xlab = "Age (days)")+
+  ylim(c(0, 1))
+
+cox_observed <- coxph(Surv(time_2yr, OM_2yr) ~ Observed+hrstonas, data = alpha_div_meta, x=TRUE)
+cox_observed
+
+p_observed <-plot_surv_area(time="time_2yr",
+               status="OM_2yr",
+               variable="Observed",
+               data=alpha_div_meta,
+               model=cox_observed, 
+               title = "Richness", 
+               xlab = "Age (days)")+
+  ylim(c(0, 1))
+```
+
+Presence/Absence Survival Analysis
+```{r}
+
+### Streptococcus -------------------------------------------------
+df_strep <- strepabundOM %>%
+  filter(Genus == "Streptococcus") %>%
+  filter(complete.cases(time_2yr, OM_2yr, anyindicate))
+
+cox_strep <- coxph(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_strep)
+sf_strep <- survfit(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_strep)
+p_strep <- ggsurvplot(sf_strep, data = df_strep,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "Presence",
+                       legend.labs = c("No", "Yes"),
+                       title = "Streptococcus")$plot+
+  theme(plot.title = element_text(face = "italic"))
+
+### Staphylococcus -----------------------------------------------
+df_staph <- strepabundOM %>%
+  filter(Genus == "Staphylococcus") %>%
+  filter(complete.cases(time_2yr, OM_2yr, anyindicate))
+
+cox_staph <- coxph(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_staph)
+sf_staph <- survfit(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_staph)
+p_staph <- ggsurvplot(sf_staph, data = df_staph,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "Presence",
+                       legend.labs = c("No", "Yes"),
+                       title = "Staphylococcus")$plot+
+  theme(plot.title = element_text(face = "italic"))
+
+### Haemophilus ---------------------------------------------------
+df_haem <- strepabundOM %>%
+  filter(Genus == "Haemophilus") %>%
+  filter(complete.cases(time_2yr, OM_2yr, anyindicate))
+
+cox_haem <- coxph(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_haem)
+sf_haem <- survfit(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_haem)
+p_haem <- ggsurvplot(sf_haem, data = df_haem,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "Presence",
+                       legend.labs = c("No", "Yes"),
+                       title = "Haemophilus")$plot+
+  theme(plot.title = element_text(face = "italic"))
+
+### Dolosigranulum -----------------------------------------------
+df_dolo <- strepabundOM %>%
+  filter(Genus == "Dolosigranulum") %>%
+  filter(complete.cases(time_2yr, OM_2yr, anyindicate))
+
+cox_dolo <- coxph(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_dolo)
+sf_dolo <- survfit(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_dolo)
+p_dolo <- ggsurvplot(sf_dolo, data = df_dolo,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "Presence",
+                       legend.labs = c("No", "Yes"),
+                       title = "Dolosigranulum")$plot+
+  theme(plot.title = element_text(face = "italic"))
+
+### Moraxella -----------------------------------------------------
+df_morax <- strepabundOM %>%
+  filter(Genus == "Moraxella") %>%
+  filter(complete.cases(time_2yr, OM_2yr, anyindicate))
+
+cox_morax <- coxph(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_morax)
+sf_morax <- survfit(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_morax)
+p_morax <- ggsurvplot(sf_morax, data = df_morax,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "Presence",
+                       legend.labs = c("No", "Yes"),
+                       title = "Moraxella")$plot+
+  theme(plot.title = element_text(face = "italic"))
+
+### Corynebacterium ----------------------------------------------
+df_cory <- strepabundOM %>%
+  filter(Genus == "Corynebacterium") %>%
+  filter(complete.cases(time_2yr, OM_2yr, anyindicate))
+
+cox_cory <- coxph(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_cory)
+sf_cory <- survfit(Surv(time_2yr, OM_2yr) ~ anyindicate, data = df_cory)
+p_cory <- ggsurvplot(sf_cory, data = df_cory,
+                       xlab = "Age (days)",
+                       ylab = "Fraction without AOM",
+                       legend.title = "Presence",
+                       legend.labs = c("No", "Yes"),
+                       title = "Corynebacterium")$plot+
+  theme(plot.title = element_text(face = "italic"))
+
+```
+
+Figure 3 - Microbiome Survival
+```{r}
+cox_models <- list(
+  "Shannon Diversity" = cox_shannon,
+  "Richness" = cox_observed,
+  "Streptococcus" = cox_strep,
+  "Staphylococcus" = cox_staph,
+  "Haemophilus" = cox_haem,
+  "Dolosigranulum" = cox_dolo,
+  "Moraxella" = cox_morax,
+  "Corynebacterium" = cox_cory)
+
+exposure_order <- c(
+  "Shannon Diversity",
+  "Richness",
+  "Streptococcus",
+  "Staphylococcus",
+  "Haemophilus",
+  "Dolosigranulum",
+  "Moraxella",
+  "Corynebacterium")
+
+forest_df <- imap_dfr(cox_models, function(model, exposure) {
+  td <- tidy(model) %>%
+    filter(term != "(Intercept)") 
+  td[1, ] %>%
+    mutate(
+      Exposure = exposure,
+      HR = exp(estimate),
+      HR_lower = exp(estimate - 1.96 * std.error),
+      HR_upper = exp(estimate + 1.96 * std.error)) %>%
+    dplyr::select(Exposure, HR, HR_lower, HR_upper)}) %>%
+  mutate(Exposure = factor(Exposure, levels = rev(exposure_order)))
+
+forestlabels <- rev(c(
+  "Shannon Diversity",
+  "Richness",
+  expression(italic("Streptococcus")),
+  expression(italic("Staphylococcus")),
+  expression(italic("Haemophilus")),
+  expression(italic("Dolosigranulum")),
+  expression(italic("Moraxella")),
+  expression(italic("Corynebacterium"))))
+
+# Forest plot
+Microbe_Forest <- ggplot(
+  forest_df,
+  aes(x = Exposure, y = HR, ymin = HR_lower, ymax = HR_upper)) +
+  geom_pointrange(size = 1) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  scale_x_discrete(labels = forestlabels) +
+  labs(x = "Microbiome Features", y = "Hazard Ratio (95% CI)", title = "") +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    panel.grid.major.y = element_blank(),
+    legend.position = "none")
+
+Microbe_Forest
+
+ggsave(
+  filename = "Microbe_Forest.png",
+  plot = Microbe_Forest,
+  width = 8,
+  height = 6,
+  dpi = 300)
+
+Microb_surv_fig <- plot_grid(
+  p_shannon, 
+  p_observed, 
+  p_strep,
+  p_staph,
+  p_haem,
+  p_dolo,
+  p_morax,
+  p_cory,
+  Microbe_Forest,
+  ncol = 3,
+  labels = c("A","B","C","D","E","F", "G","H", "I"),
+  label_fontface = "bold")
+
+Microb_surv_fig
+
+ggsave(
+  filename = "Microb_surv_fig.png",
+  plot = Microb_surv_fig,
+  width = 12,
+  height = 10,
+  dpi = 300)
+
+```
+
+Cluster generation
+```{r}
+
+tax_table(ps_birth)
+
+vegan_otu <- function(physeq) {
+  OTU <- otu_table(physeq)
+  if (taxa_are_rows(OTU)) {
+    OTU <- t(OTU)}
+  return(as(OTU, "matrix"))}
+
+ps.Genus= tax_glom(ps_birth, taxrank = "Genus") %>%
+  transform_sample_counts(.,function(x) x/sum(x)) %>%
+  subset_taxa(., Genus!= "NA") 
+
+DistType = t(as.data.frame(vegan_otu(ps.Genus)))
+
+data.dist = vegdist(vegan_otu(ps.Genus), method = "bray")
+
+pam.clustering=function(x,k) { # x is a distance matrix and k the number of clusters
+  require(cluster)
+  cluster = as.vector(pam(as.dist(x), k, diss=TRUE)$clustering)
+  return(cluster)}
+
+nclusters=NULL
+
+for (k in 1:20) { 
+  if (k==1) {
+    nclusters[k]=NA } else {
+    data.cluster_temp=pam.clustering(data.dist, k)
+    nclusters[k]=index.G1(t(DistType), data.cluster_temp,  d = data.dist,
+                          centrotypes = "medoids")}}
+
+plot(nclusters, type="h", xlab="k clusters", ylab="CH index")
+
+data.cluster=pam.clustering(data.dist, k=2)
+
+nclusters = index.G1(t(DistType), data.cluster, d = data.dist, centrotypes = "medoids")
+
+#look at number to see if it is highest average (or could change mean to median)
+obs.silhouette=mean(silhouette(data.cluster, data.dist)[,3])
+
+obs.pcoa=dudi.pco(data.dist, scannf=F, nf=2)
+
+#PCOA of clusters
+s.class(obs.pcoa$li, fac=as.factor(data.cluster), grid=T,  col = c(1:4))
+
+p = cbind(obs.pcoa$li,data.cluster)
+
+p$data.cluster = as.factor(p$data.cluster)
+
+clusterspace=ggplot(data = p, aes(x = A1, y = A2)) +
+  geom_point(data = p, aes(color = data.cluster), alpha=0.7) + 
+  #facet_wrap(~ facet, ncol=4) +
+  scale_color_manual(values = c("#4A72A6","#48A462","#7E6E85","#EC83BA","#FFB716","#e6550d","#5ab4ac")) + 
+  theme_bw() +
+  stat_ellipse(aes(color = data.cluster)) +
+  stat_stars(aes(color = data.cluster), show.legend = T) +
+  xlab("PC1 (8.5%)") + 
+  ylab("PC2 (6.7%)") +
+  labs(color = "Cluster")+ 
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.1))
+clusterspace
+
+max_k <- min(10, nsamples(ps_birth) - 1)
+ch_scores <- numeric(max_k - 1)
+
+optimal_k <- which.max(ch_scores) + 1
+
+# PAM clustering
+pam_final <- pam(data.dist, k = optimal_k, diss = TRUE)
+
+# Silhouette plot
+p3 <- fviz_silhouette(pam_final, print.summary = FALSE) +
+  labs(title = "Silhouette Plot - Cluster Quality Assessment",
+       subtitle = "Based on Genus-Species Level") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+print(p3)
+
+sample_data(ps.Genus)$cluster = as.factor(data.cluster)
+
+sampleDF = sample_data(ps.Genus) %>%
+  data.frame(.)
+
+sampleDF <- sampleDF %>% 
+ dplyr::select(Record, cluster)
+
+sampleDF <- sampleDF[!duplicated(sampleDF$Record), ]
+
+```
+
+Cluster Relative Abundance
+```{r}
+
+sampleDF <- sample_data(sampleDF)
+
+ps_birth <- merge_phyloseq(ps_birth, sampleDF)
+
+ps.NP.r = subset_samples(ps_birth, sample_data(ps_birth)$Subject %in% alpha_div_meta$Subject)
+
+ps.NP.r = transform_sample_counts(ps.NP.r,function(x) x/sum(x))
+
+sampleDF = sample_data(ps.NP.r) %>%
+  data.frame(.)
+
+ps.Genus = tax_glom(ps.NP.r, taxrank = "Genus") 
+
+genusDF = as.data.frame(cbind(t(otu_table(ps.Genus, taxa_are_rows = FALSE)), tax_table(ps.Genus)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+genusDF$C1 <- genusDF$C1 / sum(genusDF$C1)
+
+Top = genusDF$C1
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 1)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF1 = genusDF$C1 / sum(genusDF$C1)
+
+psC1 = subset_samples(ps.Genus, sample_data(ps.Genus)$cluster == 2)
+
+genusDF = as.data.frame(cbind(t(otu_table(psC1, taxa_are_rows = FALSE)), tax_table(psC1)))
+
+genusDF$Kingdom = NULL
+genusDF$Phylum=NULL
+genusDF$Class=NULL
+genusDF$Order=NULL
+genusDF$Family=NULL
+rownames(genusDF) = genusDF$Genus
+genusDF$Genus=NULL
+genusDF$Species = NULL
+genusDF = mutate_all(genusDF, function(x) as.numeric(as.character(x)))
+
+genusDF$C1 = rowMeans(genusDF)
+
+AvgDF2 = genusDF$C1 / sum(genusDF$C1)
+
+AvgDF = cbind(Top, AvgDF1, AvgDF2 ) %>%
+  data.frame(.)
+
+rownames(AvgDF) = rownames(genusDF)
+
+AvgDF$Avg = rowMeans(AvgDF)
+
+fig = top_n(AvgDF, 30, Top)
+
+fig <- fig %>% 
+  dplyr::select(AvgDF1, AvgDF2, Avg)
+
+Other = sum(AvgDF$Avg) - colSums(fig)
+
+fig = rbind(fig, Other)
+
+fig$tax = rownames(fig)
+
+fig <- fig %>% 
+  mutate(taxfix = case_when(tax == "31"~ "Other", 
+                            tax == tax ~tax))
+
+fig = dplyr::select(fig, -Avg) %>%
+  dplyr::rename('1' = AvgDF1,
+                '2' = AvgDF2)
+
+f = melt(fig) 
+
+mycolors <- c(
+  "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a",
+  "#b15928", "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f",
+  "#cab2d6", "#ffff99", "#8dd3c7", "#ffffb3", "#bebada",
+  "#fb8072", "#80b1d3", "#fdb462", "#b3de69", "#fccde5",
+  "#a6d854", "#bc80bd", "#ccebc5", "#ffed6f", "#66c2a5",
+  "#fc8d62", "#8da0cb", "#e78ac3", "black", "#ffd92f",
+  "gray" 
+)
+
+f$taxfix <- factor(f$taxfix, levels = c(
+  "Acinetobacter", "Anoxybacillus", "Bacillus", "Bacteroidetes_[G-6]",
+  "Capnocytophaga", "Corynebacterium", "Cupriavidus", "Dolosigranulum",
+  "Enterococcus", "Fastidiosipila", "Fusobacterium",
+  "Gardnerella", "Haemophilus", "Kocuria", "Lactobacillus",
+  "Leptotrichia", "Microbacterium", "Micrococcus", "Moraxella",
+  "Neisseria", "Novosphingobium", "Paracoccus", "Pedobacter",
+  "Porphyromonas", "Prevotella", "Pseudomonas", "Roseomonas",
+  "Rothia", "Sphingomonas", "Staphylococcus", "Stenotrophomonas",
+  "Streptococcus", "Veillonella",
+  "Other"
+))
+
+RAcluster=ggplot(f, aes(fill = taxfix, y=value, x=variable)) +
+  geom_bar(position="stack", stat="identity", color = "black", size = 0.25) +
+  scale_fill_manual(values = mycolors) +
+  xlab("Cluster") +
+  ylab("Mean Relative Abundance") +
+  labs(fill = "Genera", title = "") +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0,1), expand = c(0, 0))+
+theme(legend.text.align = 0)
+RAcluster
+```
+
+Cluster Survival Analysis
+```{r}
+
+birthmeta <- sample_data(ps_birth) %>% 
+  data.frame(.)
+
+birthmeta$cluster <- as.character(birthmeta$cluster)
+
+res.cox <- coxph(Surv(time_2yr, OM_2yr) ~ cluster+Mode.of.delivery+gacalcdel+hrstonas+ICUflag+hrsofrup, data = birthmeta)
+res.cox
+
+fit <- survfit(Surv(time_2yr, OM_2yr) ~ cluster, data = birthmeta)
+
+coxcluster <- ggsurvplot(fit, data = birthmeta, ylab = "Fraction without AOM", xlab = "Age (days)", legend.labs = c("1", "2"), legend.title = "Cluster", legend = "right")
+
+coxcluster$plot <- coxcluster$plot +
+  scale_color_manual(values = c("#4A72A6","#48A462","#7E6E85","#EC83BA"))
+
+coxcluster
+
+birthmeta$cluster <- factor(birthmeta$cluster)
+levels(birthmeta$cluster)
+
+contrasts(birthmeta$cluster) <- contr.sum(length(levels(birthmeta$cluster)))
+
+fit <- coxph(Surv(time_2yr, OM_2yr) ~ cluster, data = birthmeta)
+summary(fit)
+```
+
+Figure X - Clusters
+```{r}
+bigfig <- plot_grid(clusterspace,coxcluster$plot, RAcluster,  labels = c("A", "B", "C"))
+bigfig
+
+clusterRA_cox <- plot_grid(
+  bigfig,
+  ncol = 1,
+  rel_heights = c(1, 0.08))
+
+clusterfig <- plot_grid(
+  plot_grid(
+    clusterspace,
+    coxcluster$plot,
+    ncol = 1,
+    labels = c("A", "B"),
+    align = "v"),
+  plot_grid(
+    NULL,
+    RAcluster,
+    NULL,
+    ncol = 1,
+    labels = c("", "C", ""),
+    label_y = 1,  
+    label_x = -0.01,
+    rel_heights = c(1, 3, 1)),
+  ncol = 2,
+  rel_widths = c(1, 1),
+  align = "v")
+clusterfig
+
+RAcluster_mod <- RAcluster +
+  guides(fill = guide_legend(ncol = 4, byrow = TRUE)) +
+  theme(legend.position = "right") 
+
+legend <- get_legend(RAcluster_mod)
+
+RAcluster_clean <- RAcluster + theme(legend.position = "none")
+
+clusterfig <- plot_grid(
+  
+  plot_grid(
+    clusterspace,
+    coxcluster$plot,
+    ncol = 2,
+    labels = c("A", "B")),
+  plot_grid(
+    RAcluster_clean,
+    legend,
+    ncol = 2,
+    labels = c("C", ""),
+    rel_widths = c(1, 1)),
+  ncol = 1,
+  rel_heights = c(1, 1))
+
+clusterfig
+
+ggsave(
+  filename = "clusterfig.png",
+  plot = clusterfig,
+  width = 12,
+  height = 9,
+  dpi = 300)
+```
+
+```{r}
+ps_genus <- tax_glom(ps_birth, taxrank = "Genus", NArm = FALSE)
+pseq.rel <- microbiome::transform(ps_genus, "compositional")
+ASV <- abundances(pseq.rel)
+meta <- meta(pseq.rel)
+
+permanovaCLUST <- adonis2(t(ASV) ~ cluster,
+               data = meta, permutations=99, method = "bray")
+permanovaCLUST
+
+```
+
+
+Save Phyloseq
+```{r}
+
+saveRDS(ps_birth, "/Users/rapiduser/Desktop/HOPE_Manuscript/ps_birth.RDS")
+
+```
+
+
+```{r}
+
+data <- sample_data(ps_birth) %>% 
+  data.frame(.)
+
+
+data %>% 
+  dplyr::select(cluster, Mode.of.delivery, type_of_feeding_at_dischar, abxindicate, hrstonas, gacalcdel, ICUflag, gbsstatus) %>% 
+  tbl_summary(by = cluster) %>% 
+  add_p()
+
+write.csv(data, "psbirthdata.csv")
+
+```
+
+Individual Microbiome Profiles
+```{r}
+
+tax_rank <- "Genus"  
+
+physeq_genus <- tax_glom(ps_birth, taxrank = tax_rank)
+
+physeq_genus_rel <- transform_sample_counts(physeq_genus, function(x) x / sum(x))
+
+df <- psmelt(physeq_genus_rel)
+
+top_genera <- c(
+  "Acinetobacter", "Anoxybacillus", "Bacillus", "Bacteroidetes_[G-6]",
+  "Capnocytophaga", "Corynebacterium", "Cupriavidus", "Dolosigranulum",
+  "Enterococcus", "Fastidiosipila", "Fusobacterium",
+  "Gardnerella", "Haemophilus", "Kocuria", "Lactobacillus",
+  "Leptotrichia", "Microbacterium", "Micrococcus", "Moraxella",
+  "Neisseria", "Novosphingobium", "Paracoccus", "Pedobacter",
+  "Porphyromonas", "Prevotella", "Pseudomonas", "Roseomonas",
+  "Rothia", "Sphingomonas", "Staphylococcus", "Stenotrophomonas",
+  "Streptococcus", "Veillonella",
+  "Other")
+
+df$Genus2 <- ifelse(df$Genus %in% top_genera, as.character(df$Genus), "Other")
+
+df$Genus2 <- factor(df$Genus2,levels = c(
+  "Acinetobacter", "Anoxybacillus", "Bacillus", "Bacteroidetes_[G-6]",
+  "Capnocytophaga", "Corynebacterium", "Cupriavidus", "Dolosigranulum",
+  "Enterococcus", "Fastidiosipila", "Fusobacterium",
+  "Gardnerella", "Haemophilus", "Kocuria", "Lactobacillus",
+  "Leptotrichia", "Microbacterium", "Micrococcus", "Moraxella",
+  "Neisseria", "Novosphingobium", "Paracoccus", "Pedobacter",
+  "Porphyromonas", "Prevotella", "Pseudomonas", "Roseomonas",
+  "Rothia", "Sphingomonas", "Staphylococcus", "Stenotrophomonas",
+  "Streptococcus", "Veillonella",
+  "Other"))
+
+set.seed(123)  
+
+
+genus_colors <- c(
+  "#1f78b4", "#33a02c", "#e31a1c", "#ff7f00", "#6a3d9a",
+  "#b15928", "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f",
+  "#cab2d6", "tan", "#8dd3c7", "#ffffb3", "#bebada",
+  "#fb8072", "#80b1d3", "#fdb462", "#b3de69", "#fccde5",
+  "#a6d854", "#bc80bd", "#ccebc5", "#ffed6f", "#66c2a5",
+  "#fc8d62", "#8da0cb", "#e78ac3", "black", "#ffd92f",
+  "gray" )
+
+df$hrstonas <- round(df$hrstonas, digits = 1)
+df <- df[!is.na(df$hrstonas),]
+df <- df %>% 
+  filter(hrstonas > 0)
+
+
+CnoA <- df %>% 
+  filter(Mode.of.delivery == "Cesarean delivery" & abxindicate == "No") %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = Genus2)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = genus_colors) +
+  facet_wrap(~ hrstonas, nrow = 3, scales = "free_x") +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text   = element_text(size = 8)) +
+  labs(y = "Proportional Abundance",fill = "Genus (Top 30)", x = "Age (hours)", title = "Cesarean delivery and No Intrapartum Antibiotics")
+
+VnoA <- df %>% 
+  filter(Mode.of.delivery == "Vaginal delivery" & abxindicate == "No") %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = Genus2)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = genus_colors) +
+  facet_wrap(~ hrstonas, nrow = 4, scales = "free_x") +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text   = element_text(size = 8)) +
+  labs(y = "Proportional Abundance",fill = "Genus (Top 30)", x = "Age (hours)", title = "Vaginal delivery and No Intrapartum Antibiotics")
+
+CyesA <- df %>% 
+  filter(Mode.of.delivery == "Cesarean delivery" & abxindicate == "Yes") %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = Genus2)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = genus_colors) +
+  facet_wrap(~ hrstonas, nrow = 2, scales = "free_x") +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text   = element_text(size = 8)) +
+  labs(y = "Proportional Abundance",fill = "Genus (Top 30)", x = "Age (hours)", title = "Cesarean delivery and Intrapartum Antibiotics Administered")
+
+VyesA <- df %>% 
+  filter(Mode.of.delivery == "Vaginal delivery" & abxindicate == "Yes") %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = Genus2)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = genus_colors) +
+  facet_wrap(~ hrstonas, nrow = 3, scales = "free_x") +
+  theme_bw() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text   = element_text(size = 8)) +
+  labs(y = "Proportional Abundance", fill = "Genus (Top 30)", 
+    x = "Age (hours)", 
+    title = "Vaginal delivery and Intrapartum Antibiotics Administered")
+
+ggsave(
+  filename = "CnoA.png",
+  plot = CnoA,
+  width = 12,
+  height = 8,
+  dpi = 300)
+
+ggsave(
+  filename = "CyesA.png",
+  plot = CyesA,
+  width = 11,
+  height = 6,
+  dpi = 300)
+
+ggsave(
+  filename = "VnoA.png",
+  plot = VnoA,
+  width = 10,
+  height = 8,
+  dpi = 300)
+
+ggsave(
+  filename = "VyesA.png",
+  plot = VyesA,
+  width = 12,
+  height = 7,
+  dpi = 300)
+
+```
+
